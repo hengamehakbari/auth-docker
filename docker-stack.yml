@@ -1,0 +1,199 @@
+version: "3.8"
+
+# تنظیمات مشترک دو میکروسرویس: ۲ replica، حداکثر یکی روی هر سرور
+x-app-deploy: &app-deploy
+  mode: replicated
+  replicas: 2
+  placement:
+    max_replicas_per_node: 1
+  update_config:
+    parallelism: 1
+    delay: 10s
+    order: start-first
+    failure_action: rollback
+    monitor: 30s
+  rollback_config:
+    parallelism: 1
+    order: start-first
+  restart_policy:
+    condition: any
+    delay: 5s
+  resources:
+    limits: { cpus: "0.50", memory: 256M }
+    reservations: { memory: 64M }
+
+services:
+  traefik:
+    image: traefik:v2.11
+    command:
+      - --global.sendAnonymousUsage=false
+      - --log.level=INFO
+      - --accesslog=true
+      - --ping=true
+      - --providers.docker=true
+      - --providers.docker.swarmMode=true
+      - --providers.docker.exposedByDefault=false
+      - --providers.docker.network=public
+      - --providers.file.filename=/etc/traefik/dynamic.yml
+      - --entrypoints.web.address=:80
+      - --entrypoints.web.http.redirections.entryPoint.to=websecure
+      - --entrypoints.web.http.redirections.entryPoint.scheme=https
+      - --entrypoints.websecure.address=:443
+      - --entrypoints.websecure.http.tls=true
+    ports:
+      # mode: host تا IP واقعی کلاینت حفظ شود (برای ipWhiteList ضروری است)
+      - { target: 80, published: 80, protocol: tcp, mode: host }
+      - { target: 443, published: 443, protocol: tcp, mode: host }
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    configs:
+      - source: traefik_dynamic
+        target: /etc/traefik/dynamic.yml
+    secrets: [tls_cert, tls_key]
+    networks: [public]
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    deploy:
+      mode: global            # یکی روی هر سرور
+      placement:
+        constraints: [node.role == manager]   # برای دسترسی به Swarm API
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: stop-first     # چون پورت host است، start-first ممکن نیست
+      restart_policy:
+        condition: any
+        delay: 5s
+
+  visualizer:
+    image: dockersamples/visualizer:latest
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks: [public]
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+      restart_policy:
+        condition: any
+      labels:
+        - traefik.enable=true
+        - traefik.docker.network=public
+        - "traefik.http.routers.visualizer.rule=Host(`visualizer.${DOMAIN}`)"
+        - traefik.http.routers.visualizer.entrypoints=websecure
+        - traefik.http.routers.visualizer.tls=true
+        - traefik.http.routers.visualizer.middlewares=visualizer-ipwl
+        - traefik.http.middlewares.visualizer-ipwl.ipwhitelist.sourcerange=${ALLOWED_IPS}
+        - traefik.http.services.visualizer.loadbalancer.server.port=8080
+
+  authentiq:
+    image: ${REGISTRY_PREFIX}authentiq:${TAG}
+    environment:
+      NODE_ENV: production
+      AUTHENTIQ_PORT: "2052"
+      AUTHENTIQ_ADMIN_USERNAME: ${AUTHENTIQ_ADMIN_USERNAME}
+      AUTHENTIQ_ADMIN_PASSWORD_FILE: /run/secrets/authentiq_admin_password
+      AUTHENTIQ_DB_HOST: mongo
+      AUTHENTIQ_DB_PORT: "27017"
+      AUTHENTIQ_DB_NAME: authentiq
+      AUTHENTIQ_DB_USERNAME: ${MONGO_USERNAME}
+      AUTHENTIQ_DB_PASSWORD_FILE: /run/secrets/mongo_root_password
+    secrets:
+      - authentiq_admin_password
+      - mongo_root_password
+      - { source: jwt_private_key, target: /app/src/jwt/private.key, uid: "1000", gid: "1000", mode: 0400 }
+      - { source: jwt_public_key,  target: /app/src/jwt/public.key,  uid: "1000", gid: "1000", mode: 0400 }
+    networks: [public, backend]
+    stop_grace_period: 20s
+    deploy:
+      <<: *app-deploy
+      labels:
+        - traefik.enable=true
+        - traefik.docker.network=public
+        - "traefik.http.routers.authentiq.rule=Host(`auth.${DOMAIN}`)"
+        - traefik.http.routers.authentiq.entrypoints=websecure
+        - traefik.http.routers.authentiq.tls=true
+        - traefik.http.services.authentiq.loadbalancer.server.port=2052
+        - traefik.http.services.authentiq.loadbalancer.healthcheck.path=/authentiq/v1/heartbeat
+        - traefik.http.services.authentiq.loadbalancer.healthcheck.interval=10s
+        - traefik.http.services.authentiq.loadbalancer.healthcheck.timeout=3s
+
+  account-manager:
+    image: ${REGISTRY_PREFIX}account-manager:${TAG}
+    environment:
+      NODE_ENV: production
+      # فقط برای ساخت callback پرداخت: http://HOST:PORT/... (Traefik به https ریدایرکت می‌کند)
+      HOST: account.${DOMAIN}
+      PORT: "80"
+      AUTH_SERVER_ADDR: authentiq
+      AUTH_SERVER_PORT: "2052"
+      MONGO_SERVER_ADDR: mongo
+      MONGO_SERVER_PORT: "27017"
+      DB_USER: ${MONGO_USERNAME}
+      DB_PASS_FILE: /run/secrets/mongo_root_password
+      PAYMENT_URL: ${PAYMENT_URL}
+      MERCHANT_ID: ${MERCHANT_ID}
+    secrets: [mongo_root_password]
+    networks: [public, backend]
+    stop_grace_period: 20s
+    deploy:
+      <<: *app-deploy
+      labels:
+        - traefik.enable=true
+        - traefik.docker.network=public
+        - "traefik.http.routers.account.rule=Host(`account.${DOMAIN}`)"
+        - traefik.http.routers.account.entrypoints=websecure
+        - traefik.http.routers.account.tls=true
+        - traefik.http.services.account.loadbalancer.server.port=5000
+        - traefik.http.services.account.loadbalancer.healthcheck.path=/accountico/heartbeat
+        - traefik.http.services.account.loadbalancer.healthcheck.interval=10s
+        - traefik.http.services.account.loadbalancer.healthcheck.timeout=3s
+
+  mongo:
+    image: mongo:4.4
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USERNAME}
+      MONGO_INITDB_ROOT_PASSWORD_FILE: /run/secrets/mongo_root_password
+    secrets: [mongo_root_password]
+    volumes: [mongo-data:/data/db]
+    networks: [backend]
+    healthcheck:
+      test: ["CMD", "mongo", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.labels.db == true]   # volume محلی؛ به یک نود ثابت می‌شود
+      restart_policy:
+        condition: any
+        delay: 5s
+
+networks:
+  public:
+    driver: overlay
+    driver_opts: { encrypted: "true" }
+  backend:
+    driver: overlay
+    internal: true
+    driver_opts: { encrypted: "true" }
+
+volumes:
+  mongo-data:
+
+configs:
+  traefik_dynamic:
+    file: ./traefik/dynamic.yml
+
+secrets:
+  mongo_root_password: { external: true }
+  authentiq_admin_password: { external: true }
+  jwt_private_key: { external: true }
+  jwt_public_key: { external: true }
+  tls_cert: { external: true }
+  tls_key: { external: true }

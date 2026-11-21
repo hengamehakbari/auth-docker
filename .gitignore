@@ -1,0 +1,44 @@
+# ---- رمزها و تنظیمات محلی ----
+.env
+.env.*
+!.env.example
+**/.env
+.secrets/
+
+# ---- کلیدها و گواهی‌ها ----
+*.key
+*.pem
+*.crt
+*.p12
+*.pfx
+# (کلیدهای JWT توسعه؛ برای dev با openssl بسازید، در production از Docker secrets استفاده می‌شود)
+auth/src/jwt/*.key
+
+# ---- Node.js ----
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm/
+.eslintcache
+coverage/
+dist/
+
+# ---- لاگ و فایل‌های موقت ----
+*.log
+logs/
+tmp/
+*.tmp
+*.bak
+*.swp
+
+# ---- فایل‌های سیستم‌عامل و ادیتور ----
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.iml
+
+# ---- Docker ----
+docker-compose.override.yml
+*.tar

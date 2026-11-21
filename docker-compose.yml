@@ -1,0 +1,56 @@
+# محیط توسعه: docker compose up --build
+services:
+  account-manager:
+    build: { context: ./account-manager, target: dev }
+    ports: ["5000:5000"]
+    environment:
+      HOST: localhost
+      PORT: "5000"
+      AUTH_SERVER_ADDR: authentiq
+      AUTH_SERVER_PORT: "2052"
+      MONGO_SERVER_ADDR: mongo
+      MONGO_SERVER_PORT: "27017"
+      DB_USER: ${MONGO_USERNAME:-admin}
+      DB_PASS: ${MONGO_PASSWORD:-devpassword}
+      PAYMENT_URL: ${PAYMENT_URL:-https://sandbox.zarinpal.com/pg/services/WebGate/wsdl}
+      MERCHANT_ID: ${MERCHANT_ID:-XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}
+    volumes:
+      - ./account-manager:/app
+      - /app/node_modules
+    depends_on:
+      mongo: { condition: service_healthy }
+      authentiq: { condition: service_started }
+
+  authentiq:
+    build: { context: ./auth, target: dev }
+    ports: ["2052:2052"]
+    environment:
+      AUTHENTIQ_PORT: "2052"
+      AUTHENTIQ_ADMIN_USERNAME: ${AUTHENTIQ_ADMIN_USERNAME:-admin@example.com}
+      AUTHENTIQ_ADMIN_PASSWORD: ${AUTHENTIQ_ADMIN_PASSWORD:-admin12345}
+      AUTHENTIQ_DB_HOST: mongo
+      AUTHENTIQ_DB_PORT: "27017"
+      AUTHENTIQ_DB_NAME: authentiq
+      AUTHENTIQ_DB_USERNAME: ${MONGO_USERNAME:-admin}
+      AUTHENTIQ_DB_PASSWORD: ${MONGO_PASSWORD:-devpassword}
+    volumes:
+      - ./auth:/app          # شامل src/jwt/*.key برای توسعه
+      - /app/node_modules
+    depends_on:
+      mongo: { condition: service_healthy }
+
+  mongo:
+    image: mongo:4.4
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USERNAME:-admin}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:-devpassword}
+    volumes: [mongo-data:/data/db]
+    healthcheck:
+      test: ["CMD", "mongo", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  mongo-data:
